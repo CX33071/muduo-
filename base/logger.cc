@@ -45,3 +45,38 @@ void Logger::Impl::formatLevel(){
 void Logger::Impl::finish(){
     stream_ << " - " << basename_.data_ << ":" << line_ << '\n';
 }
+Logger::Logger(SourceFile file,int line):impl_(INFO,0,file,line){}
+Logger::Logger(SourceFile file,int line,LogLevel level,const char*func):impl_(level,0,file,line){
+    impl_.stream_ << func << " ";
+}
+Logger::Logger(SourceFile file,int line,bool toAbort):impl_(toAbort?FATAL:ERROR,errno,file,line){}
+LogStream&Logger::stream(){
+    return impl_.stream_;
+}
+Logger::LogLevel g_logLevel = Logger::INFO;
+Logger::LogLevel Logger::logLevel(){
+    return g_logLevel;
+}
+void Logger::setLogLevel(Logger::LogLevel level){
+    g_logLevel = level;
+}
+bool FlushFunc(){
+
+}
+Logger::~Logger(){
+    impl_.finish();
+    const std::string& msg = impl_.stream_.str();
+    if(OutputFunc()){//如果有自定义输出到哪的函数就执行，否则输出到屏幕
+        // OutputFunc(msg.c_str(),static_cast<int>(msg.size()));
+    }else{
+        fwrite(msg.c_str(), 1, msg.size(),stdout);
+    }
+    if(impl_.level_==FATAL){
+        if(FlushFunc()){//自定义刷新函数，输出到文件就fflush文件
+            FlushFunc();
+        }else{
+            fflush(stdout);
+        }
+        abort();
+    }
+}

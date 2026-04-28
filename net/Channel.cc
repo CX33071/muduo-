@@ -66,3 +66,27 @@ bool Channel::isReading()const{
 int Channel::index(){
     return index_;
 }
+void Channel::set_index(int idx){
+    index_ = idx;
+}
+EventLoop*Channel::ownerLoop(){
+    return loop_;
+}
+void Channel::enableReading(){
+    events_ |= kReadEvent;
+    update();
+}
+void Channel::disableReading(){
+    events_ &= ~kReadEvent;
+}
+void Channel::enableWriting(){
+    events_ |= kWriteEvent;
+    update();
+}
+void Channel::disableWriting(){
+    events_ &= ~kWriteEvent;
+    update();
+}
+void Channel::update(){
+    loop_->updateChannel(this);
+}

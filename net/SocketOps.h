@@ -8,15 +8,15 @@ namespace muduo{
         void bindOrDie(int sockfd, const sockaddr_in& addr);
         void listenOrDie(int sockfd);
         int accept(int sockfd, sockaddr_in* addr);
-        int acccept1(int sockfd, sockaddr_in* addr);
-        void connect(int sockfd, const sockaddr_in& addr);
+        int accept1(int sockfd, sockaddr_in* addr);
+        int connect(int sockfd, const sockaddr_in& addr);
         void close(int sockfd);
         void setNonBlockAndCloseOnExec(int sockfd);
         void shutdownWrite(int sockfd);//关闭写端
         int getSocketError(int sockfd);//获取socket内部错误码
         sockaddr_in getLocalAddr(int sockfd);//获取本端地址
         sockaddr_in getPeerAddr(int sockfd);//获取对端地址
-        bool isSelConnect(int sockfd);//判断是否自己连自己
+        bool isSelfConnect(int sockfd);//判断是否自己连自己
         void fromHostPort(const char* ip,
                           uint16_t port,
                           struct sockaddr_in* addr);//ip+端口->sockaddr_in

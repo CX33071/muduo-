@@ -3,7 +3,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
-#include "netinet../base/noncopyable.h"
+#include "../base/noncopyable.h"
 #include "SocketOps.h"
 #include "InetAddress.h"
 namespace muduo{
@@ -35,13 +35,13 @@ inline void Socket::bindAddress(const InetAddress&localaddr){
 inline void Socket::listen()const{
     socket::listenOrDie(sockfd_);
 }
-inline void Socket::shudownWrite()const{
+inline void Socket::shutdownWrite()const{
     socket::shutdownWrite(sockfd_);
 }
 inline int Socket::accept(InetAddress*peeraddr){
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    int connfd = socket::accept(sockfd_, &paddr);
+    int connfd = socket::accept(sockfd_, &addr);
 
 }
 inline int Socket::accept1(InetAddress* peeraddr) {

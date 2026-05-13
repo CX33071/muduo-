@@ -45,3 +45,8 @@ namespace muduo{
          std::mutex mutex_;
          };  // namespace net
 }
+//客户端流程：
+// TcpClient启动
+// Connector连接服务器
+// 连接成功创建Tcpconnection
+// 收发数据

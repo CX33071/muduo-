@@ -48,3 +48,11 @@ namespace muduo{
     };
     }  // namespace net
 }
+//服务器流程：
+// TcpServer启动
+// Acceptor,监听端口，连接器接受连接
+// 有新的客户端连接时创建Tcpconnection
+// 分配EventLoop
+// Channel监听事件
+// 收到数据handleRead,回调
+// 发送数据handleWrite,回调

@@ -56,3 +56,19 @@ namespace muduo{
 // Channel监听事件
 // 收到数据handleRead,回调
 // 发送数据handleWrite,回调
+// 1. TcpServer 启动 2. Acceptor 开始监听端口 3. 客户端发起连接 4. Acceptor
+//         接受连接，拿到新 sockfd 5. TcpServer::newConnection 创建
+//             TcpConnection 6. 从线程池分配一个 EventLoop 7. 为 sockfd 创建
+//                 Channel 8. Channel 注册读 /
+//     写 / 关闭 /
+//     错误事件监听 9. 等待客户端数据到达
+
+//     10. 收到数据 → 触发 handleRead 读入 inputBuffer → 回调业务 MessageCallback
+
+//     11. 业务发送数据 → 调用 conn->send()
+//         可直接发就直接 write 发不完放进 outputBuffer，开启可写监听
+
+//     12. 内核可写 → 触发 handleWrite 不断把 outputBuffer 数据发完
+//     发完关闭写监听，触发 WriteCompleteCallback
+
+//     13. 客户端断开 → 触发 handleClose TcpServer 移除连接，安全销毁 TcpConnection

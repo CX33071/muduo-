@@ -18,6 +18,7 @@ void Connector::start(){
 }
 void Connector::startInLoop(){
     loop_->assertInLoopThread();//确保在IO线程
+    ///适配单线程客户端和多线程客户端，如果是单线程，业务代码和eventloop在同一个线程，直接原第执行，不会跨线程；否则业务在主线程eventloop在子线程，这是runinloop会把任务塞进队列
     assert(state_ == kDisconnected);//确保状态是未连接
     if(connect_){
         connect();//真正发起连接
@@ -87,7 +88,7 @@ void COnnector::connecting(int sockfd){//进入连接中状态
 }
 void Connector::handleWrite() {
     LOG_TRACE << "Connector::handleWrite " << state_;
-    if (state_ == kConnecting) {
+    if (state_ == kConnecting) {//此时连接已经完成，不论成功与否，只是状态还没更新
         int sockfd = removeAndResetChannel();
         int err = socket::getSocketError(sockfd);
         if (err) {
@@ -118,7 +119,7 @@ void Connector::handleError(){
         retry(sockfd);
     }
 }
-//自动重连：连接失败、关闭socket、延迟重试、等待时间翻倍
+//自动重连：从来没有连接成功过
 void Connector::retry(int sockfd){
     socket::close(sockfd);//关闭旧的sockfd
     setState(kDisconnected);

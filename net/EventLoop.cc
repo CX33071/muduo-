@@ -52,7 +52,7 @@ void EventLoop::quit(){
         wakeup();//唤醒epoll,让它退出阻塞
     }
 }
-boll EventLoop::isInLoopThread()const{
+bool EventLoop::isInLoopThread()const{
     return std::this_thread::get_id() == threadId_;
 }
 void EventLoop::assertInLoopThread(){
@@ -134,7 +134,7 @@ TimerId EventLoop::runAfter(double delay,const Timer::TimerCallback &cb){
     Timestamp time(Timestamp::addTime(Timestamp::now(), delay));
     return runAt(time, cb);
 }//非静态成员函数或变量必须依附于某个具体对象
-TImerId EventLoop::runEvery(double interval,const Timer::TimerCallback&cb){
+TimerId EventLoop::runEvery(double interval,const Timer::TimerCallback&cb){
     Timestamp time(Timestamp::addTime(Timestamp::now(), interval));
     return timerQueue_->addTimer(cb, time, interval);
 }

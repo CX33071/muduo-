@@ -27,6 +27,7 @@ namespace muduo{
              };//用状态及保证不会重复连接，不会乱序
           static const int kMaxRetryDelayMs = 30 * 1000;//最大重试间隔30s
           static const int kInitRetryDelayMs = 500;//初始间隔500ms
+          //指数退避重试，连接失败500ms->1s->...->30s
           void setState(States s) { state_ = s; }//设置状态
           void startInLoop();//真正开始连接，在IO线程执行,外部调用start(),转到startInLoop()
           void stopInLoop();//真正停止连接,外部调用stop

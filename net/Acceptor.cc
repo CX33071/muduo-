@@ -8,8 +8,8 @@ Acceptor::Acceptor(EventLoop*loop,const InetAddress&listenAddr):loop_(loop),acce
     acceptSocket_.bindAddress(listenAddr);
     acceptChannel_.setReadCallback([this](Timestamp) { handleRead(); });
 }
-void Accept::listen(){
-    loop->assertInLooThread();
+void Acceptor::listen(){
+    loop_->assertInLoopThread();
     listening_ = true;
     acceptSocket_.listen();
     acceptChannel_.enableReading();//channel开始监听读事件

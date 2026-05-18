@@ -58,13 +58,13 @@ namespace mduo{
          void handleError();
          void sendInLoop(const std::string& msg);
          void shutdownInLoop();
-         consr char* stateToString() const;
+         const char* stateToString() const;
          EventLoop* loop_;
          std::string name_;
          StateE state_;
          std::unique_ptr<Socket> socket_;
          std::unique_ptr<Channel> channel_;
-         InetAddress localAddr_;
+         InetAddress localAddr_;//服务端的localAddr就是服务端绑定地址，对端就是客户端地址，分服务端和客户端的Tcpconnection
          InetAddress peerAddr_;
          ConnectionCallback connectionCallback_;
          MessageCallback messageCallback_;
@@ -77,3 +77,5 @@ namespace mduo{
     };
     }  // namespace net
 }
+// 读事件handleRead主动调用
+// 写事件用send,send可能内核缓冲区满了一次性发不完，handlewrite用来自动发outputBuffer临时存的数据

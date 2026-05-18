@@ -2,7 +2,7 @@
 #include <thread>
 #include <mutex>
 #include "../base/noncopyable.h"
-#include "TimeId.h"
+#include "TimerId.h"
 #include "TimerQueue.h"
 #include "sigpipe.h"
 #include <memory>
@@ -57,3 +57,4 @@ namespace muduo{
     };
     }  
 }
+//业务线程调用runInLoop时，如果已经在IO线程，epoll已经被唤醒，就直接执行任务，但是如果不在IO线程，此时要进入IO线程执行任务，先把任务添加进队列，业务线程已经被唤醒，但是IO线程此刻不一定被唤醒，所以要用wakeupfd唤醒IO线程，让IO线程知道队列来任务了，去执行,之后再用handleRead取出wakeup()写进去的数据，因为wakeupfd是水平触发，不取出来一直通知有可读事件，真正处理读事件用的是Tcpconnection的handleRead()

@@ -57,6 +57,6 @@ TcpServer::~TcpServer(){
     for(auto&item:connections_){
         TcpConnectionPtr conn(item.second);//拷贝一份连接给局部变量conn,确保不会再操作的时候断开连接
         item.second.reset();//从map中删除
-        conn->getLoop()-<runINLoop(std::bind(&TcpConnection::connectDestroyed,conn));//销毁连接
+        conn->getLoop()-<runINLoop(std::bind(&TcpConnection::connectDestroyed,conn));//让连接自己的IO线程去安全销毁这个连接
     }
 }

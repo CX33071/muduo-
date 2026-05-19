@@ -28,7 +28,7 @@ void Channel::handleEvent(muduo::base::Timestamp receiveTime){
     }
     if(revents_&(POLLOUT)){
         if(writeCallback_){
-            writeCallback_(receiveTime);
+            writeCallback_();
         }
     }
 }
@@ -36,7 +36,7 @@ void Channel::handleEvent(muduo::base::Timestamp receiveTime){
 void Channel::setReadCallback(const ReadEventCallback&cb){
     readCallback_ = cb;
 }
-void Channel::setWriteCallback(const ReadEventCallback&cb){
+void Channel::setWriteCallback(const EventCallback&cb){
     writeCallback_ = cb;
 }
 void Channel::setErrorCallback(const EventCallback& cb) {

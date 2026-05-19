@@ -1,12 +1,13 @@
 #include "Epoller.h"
 #include <errno.h>
+#include "Channel.h"
 #include <unistd.h>
 //给updateChannel判断执行ADD还是DEL
 const int _knew = -1;//Channel从没加入epoll
 const int _kadded = 1;//已在epoll中
 const int _kdelete = 2;//从epoll中删除
 using namespace muduo::net;
-using CHannelList = std::vector<Channel*>;
+using ChannelList = std::vector<Channel*>;
 Epoller::Epoller(EventLoop *loop):ownerLoop_(loop),epollfd_(epoll_create1(EPOLL_CLOEXEC)),events_(kInitEventListSize){
     if(epollfd_<0){
         LOG_FATAL << "Epoller::Epoller";
@@ -16,7 +17,7 @@ Epoller::~Epoller(){
     close(epollfd_);
 }
 //epoll_wait内核返回活跃fd交给fillActiveChannels
-muduo::base::Timestamp Epoller::poll(int timeoutMs,CHannelList&activeCHannels){
+muduo::base::Timestamp Epoller::poll(int timeoutMs,ChannelList&activeChannels){
     Timestamp now(Timestamp::now());
     while(1){
         int numEvents =

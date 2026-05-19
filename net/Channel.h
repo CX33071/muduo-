@@ -3,6 +3,7 @@
 #include "../base/Timestamp.h"
 #include <functional>
 #include <memory>
+
 namespace muduo{
     namespace net{
     class EventLoop;//向前声明，告诉编译器有一个类叫做EventLoop,不需要关注里面的内容，不包含头文件减少编译书监，降低头文件耦合
@@ -14,8 +15,8 @@ namespace muduo{
         ~Channel() {};
         void handleEvent(base::Timestamp);//有事件来时执行这个函数，函数内部再调用4个回调函数
         void setReadCallback(const ReadEventCallback & cb);
-        void setWriteCallback(const ReadEventCallback& cb);
-        void setErrorCallback(const ReadEventCallback& cb);
+        void setWriteCallback(const EventCallback& cb);
+        void setErrorCallback(const EventCallback& cb);
         void setCloseCallback(const EventCallback& cb);
         int fd() const;
         int events() const;
@@ -32,7 +33,7 @@ namespace muduo{
         int index();//channel的状态标记，channel是否已经添加进EventLoop
         void set_index(int idx);
         EventLoop* ownerLoop();
-        void serRevents(int revent) { revents_ = revent; };
+        void setRevents(int revent) { revents_ = revent; }
         private:
          void update();
          static const int kNoneEvent;
@@ -44,7 +45,7 @@ namespace muduo{
          int revents_;//epoll返回的就绪的事件
          int index_;
          ReadEventCallback readCallback_;
-         ReadEventCallback writeCallback_;
+         EventCallback writeCallback_;
          EventCallback closeCallback_;
          EventCallback errorCallback_;
     };

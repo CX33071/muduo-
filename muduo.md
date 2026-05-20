@@ -415,11 +415,278 @@ void Connector::resetChannel(){
 
 **`Tcpconnection`**
 
+一个客户端连接的全权管理者，作用是收发数据、处理连接、关闭连接
+
+流程：客户端连接成功`Acceptor`调用回调函数`newconnectioncallback`调用`Tcpserver`的`newconnection`创建新连接，创建`channel`，把自己的`fd`、`loop`传给`channel`，绑定`channel`监听读事件，客户端发数据触发`handleRead`，读到`inputBuffer`，将自己的`handleRead`绑到`channel`的`setReadCallback`回调里，当客户端来数据时调用`channel`的回调函数
+
+干了什么？
+
+绑定IO线程(一个连接终身属于一个线程)，创建`channel`，绑定自己的四大事件回调给`channel`，便于`epoll`被唤醒要`channel`处理事件，把`channel`注册到`epoll`，开始监听读事件，读事件`handleRead`被调用，调用用户回调`messagecallback`业务函数，这个业务函数`muduo`里并没有实现要靠自己后续写你的业务逻辑
+
+```c
+namespace mulib{
+    namespace net{
+        class Buffer;
+        class TcpConnection : noncopyable,
+        public std::enable_shared_from_this<TcpConnection>{
+        public:
+            using TcpConnectionPtr = std::shared_ptr<TcpConnection>;
+            using ConnectionCallback = std::function<void(const TcpConnectionPtr &)>;
+            using MessageCallback = std::function<void(const TcpConnectionPtr &, Buffer *, Timestamp)>;
+            using WriteCompleteCallback = std::function<void(const TcpConnectionPtr &)>;
+            using CloseCallback = std::function<void(const TcpConnectionPtr &)>;
+            using HighWaterMarkCallback = std::function<void(const TcpConnectionPtr &, size_t)>;
+
+            TcpConnection(EventLoop *loop, std::string conName, int sockfd, InetAddress localAddr, InetAddress peerAddr);
+            ~TcpConnection();
+            void setConnectionCallback(ConnectionCallback cb) { connectionCallback_ = cb; }
+            void setMessageCallback(MessageCallback cb) { messageCallback_ = cb; }
+            void setWriteCompleteCallback(WriteCompleteCallback cb) { writeCompleteCallback_ = cb; }
+            void setCloseCallback(CloseCallback cb) { closeCallback_ = cb; }
+            void setHighWaterMarkCallback(const HighWaterMarkCallback &cb, size_t highWaterMark){
+                highWaterMarkCallback_ = cb;
+                highWaterMark_ = highWaterMark;
+            } // 当发送缓冲区大小超过 highWaterMark 阈值时触发
+
+            void connectEstablished();
+            void connectDestroyed();
+            void send(const std::string &message);
+
+            void shutdown();
+            void forceClose();
+
+        private:
+            enum StateE
+            {};
+            void handleRead(Timestamp receiveTime);
+            void handleClose();
+            void handleWrite();
+            void handleError();
+            void sendInLoop(const std::string &msg);
+            void shutdownInLoop();
+            EventLoop *loop_; // 此连接所属的 EventLoop
+            StateE state_;
+            std::unique_ptr<Socket> socket_;
+            std::unique_ptr<Channel> channel_; // 事件分发器，监控 fd 上的事件（读写）
+            InetAddress localAddr_;
+            InetAddress peerAddr_;
+
+            ConnectionCallback connectionCallback_;
+            MessageCallback messageCallback_;
+            WriteCompleteCallback writeCompleteCallback_;
+            CloseCallback closeCallback_;
+            HighWaterMarkCallback highWaterMarkCallback_;
+
+            size_t highWaterMark_;
+            Buffer inputBuffer_;
+            Buffer outputBuffer_;
+        };
+    }
+}
+```
+
 **`TcpServer`**
+
+流程：
+
+创建`Tcpconnection`后分配一个IO线程，把连接加入`map`，客户端发消息用回调用户函数
+
+有一个保存所有客户端连接的`ConnectionMap`，`key`:连接名字，`value`:`TcpconnectionPtr`
+
+用户写业务逻辑只需要写3个回调：
+
+并且这些用户设置的回调`Tcpserver`会传给每个`Tcpconnection`
+
+```c
+// 连接建立/断开时调用
+void setConnectionCallback(const ConnectionCallback &cb) { connectionCallback_ = cb; };
+
+// 收到消息时调用
+void setMessageCallback(const MessageCallback &cb) { messageCallback_ = cb; };
+
+// 发送完成时调用
+void setWriteCompleteCallback(const WriteCompleteCallback &cb) { writeCompleteCallback_ = cb; };
+```
+
+核心函数`newconnection`
+
+```c
+void TcpServer::newConnection(int sockfd, const InetAddress &peerAddr) {
+    loop_->assertInLoopThread();
+
+    // 1. 从线程池轮询取一个 IO 线程
+    EventLoop *ioLoop = threadpool_->getNextLoop();
+
+    // 2. 生成唯一连接名 name_ip:port#id
+    char buff[32];
+    snprintf(buff, sizeof(buff), "-%s#%d", ipPort_.c_str(), nextConnId_++);
+    std::string connName = name_ + buff;
+
+    // 3. 创建 TcpConnection
+    TcpConnectionPtr conn(new TcpConnection(ioLoop, connName, sockfd, localAddr, peerAddr));
+
+    // 4. 把连接存入 map 管理
+    connections_[connName] = conn;
+
+    // 5. 设置用户回调
+    conn->setConnectionCallback(connectionCallback_);
+    conn->setMessageCallback(messageCallback_);
+    conn->setCloseCallback([this](const TcpConnectionPtr &conn) {
+        removeConnection(conn);
+    });
+
+    // 6. 通知连接建立
+    ioLoop->runInLoop([conn] { conn->connectEstablished(); });
+}
+```
+
+这个函数干了6件大事：选一个IO线程、生成一个唯一连接名、创建`Tcpconnection`、存入`map`管理、设置回调、激活连接
+
+析构函数：
+
+```c
+TcpServer::~TcpServer() {
+    for (auto &item : connections_)
+    {
+        TcpConnectionPtr conn(item.second);
+        item.second.reset();
+        conn->getLoop()->runInLoop(std::bind(&TcpConnection::connectDestroyed, conn));
+    }
+}
+
+```
+
+把`map`里的`shared_ptr`拷贝一份，让局部变量`conn`共同拥有这个连接，保证连接在操作时不会被释放，后面`reset`之后连接还活着因为上一句拷贝了`conn`，之后让连接自己的IO线程取安全销毁这个连接
 
 **`TcpClient`**
 
+只干三件事：主动连接服务器、管理与服务器的那条连接、断开连接重连停止
 
+回调和服务端接口一样，设置的3个回调
+
+```c
+void setConnectionCallback(const ConnectionCallback &cb) { connectionCallback_ = cb; }
+void setMessageCallback(const MessageCallback &cb) { messageCallback_ = cb; }
+void setWriteCompleteCallback(const WriteCompleteCallback &cb) { writeCompleteCallback_ = cb; }
+```
+
+## 总结这些`muduo`全家桶都负责什么
+
+`EventLoop`只负责“总指挥”
+
+`Channel`只负责“通知”
+
+`EventLoopThread`只负责“出工人”
+
+`EventLoopThreadPool`只负责“包工头”
+
+`Acceptor`只负责“接客”
+
+`Connector`只负责“主动敲门”
+
+`TcpServer`只负责“分配”
+
+`TcpConnection`只负责“服务”
+
+`MessageCallback`负责“干活”
+
+## 服务端的`main`函数
+
+```c
+#include <muduo/net/EventLoop.h>
+#include <muduo/net/TcpServer.h>
+#include <muduo/base/Logging.h>
+#include <muduo/base/Timestamp.h>
+
+using namespace muduo;
+using namespace muduo::net;
+
+// 全局/成员变量：记录当前连接数
+int g_connCount = 0;
+
+// 1. 定时任务：每5秒打印一次服务器状态
+void printServerStatus()
+{
+    LOG_INFO << "=== 服务器状态 ===";
+    LOG_INFO << "当前活跃连接数: " << g_connCount;
+    LOG_INFO << "==================\n";
+}
+
+// 2. 定时清理空闲连接（你要的定时器场景）
+void checkIdleConnections()
+{
+    LOG_INFO << "定时检查: 无空闲连接需要清理 (演示用)";
+}
+
+// 连接建立/断开回调
+void onConnection(const TcpConnectionPtr& conn)
+{
+    if (conn->connected())
+    {
+        LOG_INFO << "连接建立: " << conn->peerAddress().toIpPort();
+        g_connCount++;
+    }
+    else
+    {
+        LOG_INFO << "连接断开: " << conn->peerAddress().toIpPort();
+        g_connCount--;
+    }
+}
+
+// 消息到达回调
+void onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp time)
+{
+    string msg = buf->retrieveAllAsString();
+    LOG_INFO << "收到消息: " << msg << " 来自: " << conn->peerAddress().toIpPort();
+
+    // 回显给客户端
+    conn->send(msg);
+}
+
+int main()
+{
+    // 初始化日志等级（INFO及以上输出）
+    Logger::setLogLevel(Logger::INFO);
+
+    // 主线程 EventLoop
+    EventLoop loop;
+
+    // 监听 0.0.0.0: 8888
+    InetAddress listenAddr(8888);
+    TcpServer server(&loop, listenAddr, "SimpleServer");
+
+    // 开启 3 个子 IO 线程
+    server.setThreadNum(3);
+
+    // 设置回调
+    server.setConnectionCallback(onConnection);
+    server.setMessageCallback(onMessage);
+
+    // ====================== 定时器 核心代码 ======================
+
+    // 1. 每 5 秒执行一次：打印服务器状态（周期性任务）
+    loop.runEvery(5.0, printServerStatus);
+
+    // 2. 每 10 秒执行一次：清理空闲连接（超时断开用）
+    loop.runEvery(10.0, checkIdleConnections);
+
+    // 3. 3 秒后执行一次：服务器启动成功提示（一次性延时任务）
+    loop.runAfter(3.0, [](){
+        LOG_INFO << "===== 服务器启动完成，已监听 8888 端口 =====";
+    });
+
+    // ============================================================
+
+    // 启动服务器
+    server.start();
+
+    // 事件循环（必须调用）
+    loop.loop();
+
+    return 0;
+}
+
+```
 
 
 

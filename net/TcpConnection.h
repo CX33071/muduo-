@@ -12,7 +12,7 @@ namespace mduo{
          using TcpConnectionPtr = std::shared_ptr<TcpConnection>;
          using ConnectionCallback = std::function<void(const TcpConnection&)>;//连接建立/断开时调用
          using MessageCallback =
-             std::function<void(const TcpConnectionPtr&, Buufer*, Timestamp)>;//收到消息时调用
+             std::function<void(const TcpConnectionPtr&, Buffer*, Timestamp)>;//收到消息时调用
          using WriteCompleteCallback =
              std::function<void(const TcpConnectionPtr&)>;
          using CloseCallback = std::function<void(const TcpConnectionPtr&)>;//连接关闭时调用通知上层

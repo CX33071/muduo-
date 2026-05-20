@@ -8,7 +8,7 @@ namespace muduo{
             public:
              EventLoopThreadPool(EventLoop* baseloop);
              ~EventLoopThreadPool();
-             void setThreadNum(int numThreads) { numTHreads_ = numThreads; }//设置线程数量，子IO线程数
+             void setThreadNum(int numThreads) { numThreads_ = numThreads; }//设置线程数量，子IO线程数
              void start();//启动线程池，创建所有线程和loop
              EventLoop* getNextLoop();//取出下一个loop来处理新连接
             private:

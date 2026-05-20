@@ -8,7 +8,7 @@ namespace muduo{
     namespace net{
         class EventLoopThread{
             public:
-            EventLoopThread():loop_(mullptr),exiting_(false){}
+            EventLoopThread():loop_(nullptr),exiting_(false){}
             ~EventLoopThread();
             EventLoop* startLoop();//启动线程，返回里面的loop,主线程等子线程把EventLoop创建好再返回指针
             private:
@@ -25,7 +25,7 @@ using namespace muduo::net;
 inline EventLoop*EventLoopThread::startLoop(){
     thread_ = std::thread([this] { threadFunc(); });
     {//等待线程里的loop创建完成
-        std::unique_lock < std::mutex lock(mutex_);
+        std::unique_lock < std::mutex> lock(mutex_);
         cond_.wait(lock, [this]() { return loop_ != nullptr; });
     }
     return loop_;//返回创建好的EVentLoop
@@ -38,7 +38,7 @@ inline EventLoopThread::~EventLoopThread(){
     thread_.join();//等待线程结束
 }
 inline void EventLoopThread::threadFunc(){
-    EvnetLoop loop;//创建
+    EventLoop loop;//创建
     {
         std::unique_lock<std::mutex> lock(mutex_);
         loop_ = &loop;

@@ -231,15 +231,193 @@ namespace mulib{
 }
 ```
 
+```c
+void EventLoop::runInLoop(const Functor &cb){
+    if(isInLoopThread()){//当前就是IO线程，直接执行
+        cb();
+    }else{
+        queueInLoop(cb);//跨线程任务，扔到对应IO线程队列执行
+    }
+}
+```
+
+什么时候执行跨线程任务？
+
+1.主线程接受新的客户端连接，现在要把客户端`fd`分配给子线程进行监听
+
+2.例如`FTP`的服务端和客户端之间的通话，服务端给客户端发消息跳到对应IO线程去执行`send`，非IO线程调用`send`内部自动跨线程
+
+3.服务端要求关掉某个客户端的连接
+
+怎么执行跨线程任务？
+
+当非IO线程把任务交给IO线程时这时只是IO线程的任务队列进来一个函数，但是IO线程并不知道有任务来了，所以需要被主动唤醒，`EventLoop`的`wakeup`函数就是用来唤醒IO线程的，`EventLoop`的`handleRead`用来取走`wakeup`写进IO线程缓冲区的东西，水平触发，防止IO线程一直被唤醒
+
 业务线程调用`runInLoop`时，如果已经在`IO`线程，`epoll`已经被唤醒，就直接执行任务，但是如果不在`IO`线程，此时要进入`IO`线程执行任务，先把任务添加进队列，业务线程已经被唤醒，但是`IO`线程此刻不一定被唤醒，所以要用`wakeupfd`唤醒`IO`线程，让`IO`线程知道队列来任务了，去执行,之后再用`handleRead`取出`wakeup()`写进去的数据，因为`wakeupfd`是水平触发，不取出来一直通知有可读事件，真正处理读事件用的是`Tcpconnection`的`handleRead()`
 
+**`EventLoopThread`**
 
+是`one loop per thread`的封装，对一个线程和`EventLoop`的封装，主线程调用`startLoop`，取出一个子线程，在子线程里建一个`Loop`，建完返回loop*告诉主线程建完了，子线程`Loop.Loop()`开始对客户端的监听
+
+```c
+namespace muduo{
+    namespace net{
+        class EventLoopThread{
+            public:
+         EventLoopThread():loop_(nullptr),exiting_(false){}
+            ~EventLoopThread();
+            EventLoop* startLoop();//启动线程，返回里面的loop,主线程等子线程把EventLoop创建好再返回指针
+            private:
+             void threadFunc();//线程真正执行的函数
+             std::thread thread_;//线程对象
+             EventLoop* loop_;//线程里跑的循环loop
+             std::mutex mutex_;
+             std::condition_variable cond_;//等待loop创建好
+             bool exiting_;
+        };
+        }  
+}
+using namespace muduo::net;
+inline EventLoop*EventLoopThread::startLoop(){
+    thread_ = std::thread([this] { threadFunc(); });
+    {//等待线程里的loop创建完成
+        std::unique_lock < std::mutex> lock(mutex_);
+        cond_.wait(lock, [this]() { return loop_ != nullptr; });
+    }
+    return loop_;//返回创建好的EVentLoop
+}
+inline void EventLoopThread::threadFunc(){
+    EventLoop loop;//创建
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        loop_ = &loop;
+        cond_.notify_one();//唤醒，通知主线程已经创好
+    }
+    loop.loop(-1);//启动事件循环，阻塞再这里
+}
+```
+
+**`EventLoopThreadPool`**
+
+事件循环线程池，管理主`EventLoopThread`和一堆子`EventLoopThread`，`start`启动线程池时创建所有`EventLoopThread`
+
+```c
+namespace muduo{
+    namespace net{
+        class EventLoopThreadPool:noncopyable{
+            public:
+             EventLoopThreadPool(EventLoop* baseloop);
+             ~EventLoopThreadPool();
+             void start();//启动线程池，创建所有线程和loop
+             EventLoop* getNextLoop();//取出下一个loop来处理新连接，Acceptor连接成功时分配一个子线程
+            private:
+             EventLoop* baseLoop_;
+             bool started_;//线程是否启动
+             int numThreads_;//线程总数
+             int next_;//记录下次用第几个loop
+             std::vector<std::shared_ptr<EventLoopThread>> threads_;//存放所有线程对象
+             std::vector<EventLoop*> loops_;//存放所有线程的loop指针
+        };
+        }  
+}
+```
+
+#### **总结**
+
+不实现具体业务，只搭建事件驱动+多线程调度、IO 监听框架
+
+**流程：**
+
+客户端发起连接→主线程 `Acceptor` 获取客户端 `fd`→线程池分配子线程` EventLoop`→创建绑定 `fd` 的  `Channel`→子线程更新通道加入 `epoll` 监听→数据抵达触发 `IO` 事件→`Epoller` 上报活跃 `Channel`→`Channel ` 执行读写回调完成数据交
 
 ### 模块二：网络基础(`socket`、地址、缓冲区)
 
+**`InetAddress`**就是对 `sockaddr_in` 的 C++ 包装
 
+**`SocketOps`**纯静态函数，包装`Linux`的`socketAPI`，系统调用
+
+**`Socket`**对`socket`的对象包装，全用`Socketops`的函数
+
+**`Buffer`**
+
+自动扩容的`TCP`缓冲区，能够解决拆包、粘包、读写数据的任务，底层是通过`vector`和双指针(读写指针)实现，`readIndex`下次从哪读，`writeIndex`下次从哪写，数据永远在这两个指针中间
+
+要发送的数据都先放进`outputBuffer`，最后由`EventLoop`线程统一发送
+
+```c
+namespace muduo{
+    namespace net{
+        class Buffer{
+            public:
+             const static size_t kCheapPrepend = 8;//头部预留8字节,用来在数据包前加长度，解除粘包
+             const static size_t kInitialSize = 1024;//初始大小1k
+             Buffer();
+             size_t readableBytes() const;//可读数据长度
+             size_t writeableBytes() const;//可写空间长度
+             size_t prependableBytes() const;//头部预留空间
+// readableBytes() = writerIndex_ - readerIndex_ writableBytes() =buffer.size() - writerIndex_
+// prependableBytes() = readerIndex_
+             void swap(Buffer& rhs);//交换两个缓冲区
+             const char* peek() const;//获取读指针，返回第一个可读字节的指针begin()+readerIndex_
+             //只移动指针，不删除数据
+             void retrieve(size_t len);//读了len字节，指针往后挪len
+             std::string retrieveAllAsString();//取出数据，返回字符串。自动移动读指针
+             void append(const char* data, size_t len);//往缓冲区写数据，空间不足则自动扩容
+             void prepend(const void* data, size_t len);//头部插入数据的长度，解决粘包
+             ssize_t readFd(int, int* saveErrno);//从socket直接读到缓冲区，非阻塞IO必须用这个，一次性读尽可能多的数据
+             private:
+              void makeSpace(size_t len);//扩容
+              std::vector<char> buffer_;
+              size_t readerIndex_;//读指针
+              size_t writerIndex_;//写指针
+        };
+        }  
+}
+```
+
+**注意这里还有一个类`sigpipe`，封装了忽略信号`SIGPIPE`的逻辑，客户端断开连接，服务器还在向这个socket写数据，系统会向服务器发送一个信号`SIGPIPE`，默认收到`SIGPIPE`进程直接退出，所以要忽略，全局类对象程序启动自动初始化
+
+#### **总结**
+
+就是对`addr`和`socket`的封装工具类
 
 ### 模块三：`TCP`业务层(`server`、`client`连接管理)
+
+**`Acceptor`**
+
+创建`server socket`，有客户端来，接收连接，调用回调函数，把`sock`交给`Tcpserver`,`tcpserver`会创建`tcpconnection`管理这个连接，具体执行连接的工具
+
+**`Connector`**
+
+和`Acceptor`一样，创建`socket`，进行连接，有连接成功时调用回调函数，把`sock`交给`Tcpserver`,`tcpserver`会创建`tcpconnection`管理这个连接， 如果连接失败 ，自动重试（指数退避，`500ms → 1s → 2s → 4s…`)，具体执行连接的工具
+
+这里有两个函数需要区分一下：
+
+```c
+int Connector::removeAndResetChannel(){
+    channel_->disableAll();      // 第一步：停止所有事件监听
+    int sockfd = channel_->fd(); // 保存 fd，后面要返回
+    loop_->queueInLoop([this] {
+        resetChannel();          // 第二步：把 reset 扔到队列稍后执行
+    });
+    return sockfd;               // 返回 fd 给调用方
+}
+
+```
+
+```c
+void Connector::resetChannel(){
+    channel_.reset(); // 释放 Channel 对象
+}
+```
+
+`removeAndResetChannel`停止` Channel` 上所有的读写事件监听，让 `Epoll` 不再管它，把`resetChannel`先放在队列里不立刻销毁`channel`，因为现在正在执行`channel`的回调函数，等回调执行完再销毁
+
+**`Tcpconnection`**
+
+**`TcpServer`**
+
+**`TcpClient`**
 
 
 

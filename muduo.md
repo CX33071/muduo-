@@ -590,17 +590,327 @@ void setWriteCompleteCallback(const WriteCompleteCallback &cb) { writeCompleteCa
 
 `MessageCallback`负责“干活”
 
+#### 总结
+
+`muduo`的完整`TCP`通信层，负责建立连接(被动+主动)、管理连接、收发数据、定时任务、事件驱动
+
+## 一个图串起`muduo`
+
+```c
+1. 程序启动
+    main()
+        → TcpServer::TcpServer() 构造初始化
+        → TcpServer::start()
+            → EventLoopThreadPool::start() 启动所有IO线程
+            → Acceptor::listen() 开启端口监听
+                → Acceptor::handleRead()【listenfd可读触发】
+                    → accept() 获取客户端sockfd
+                    → Acceptor::newConnectionCallback() 回调
+
+2. 接入分发流程
+    newConnectionCallback 绑定 → TcpServer::newConnection()
+        → EventLoopThreadPool::getNextLoop() 轮询选子线程EventLoop
+        → 创建 TcpConnection 对象(均在主线程进行)
+            → TcpConnection构造函数
+                → new Socket 封装fd
+                → new Channel(loop,fd)
+                → Channel绑定四大回调：
+                    setReadCallback(handleRead)
+                    setWriteCallback(handleWrite)
+                    setCloseCallback(handleClose)
+                    setErrorCallback(handleError)
+        → loop_->runInLoop() 跨线程投递任务(把主线程创建的channel分配给子线程，在子线程注册channel到epoll)
+            → TcpConnection::connectEstablished()
+                → setState(kConnected)
+                → Channel::enableReading() 注册读事件
+                → connectionCallback_ 连接上线回调
+
+3. 客户端发数据 读流程
+    客户端发送数据 → 内核fd可读
+    → Epoller::poll() 阻塞等待事件
+    → EventLoop::loop() 拿到活跃Channel
+    → Channel::handleEvent()
+        → 判断读事件就绪
+        → 执行 TcpConnection::handleRead(Timestamp)
+            → Buffer::readFd() 数据读到inputBuffer_
+            → 读到n>0：
+                → messageCallback_(conn, buf, time) 【用户业务回调】
+            → 读到n==0：客户端关闭
+                → TcpConnection::handleClose()
+            → 读到异常：
+                → TcpConnection::handleError()
+
+4. 服务端主动发数据 写流程
+    用户调用 TcpConnection::send(string)
+        → 判断是否当前IO线程
+        → 非IO线程：runInLoop 跨线程
+        → 进入 TcpConnection::sendInLoop()
+            → 优先直接::write系统调用发送
+            → 发送不完剩余数据append进outputBuffer_
+            → Channel::enableWriting() 注册可写事件
+    内核缓冲区可写触发
+    → Channel触发写回调
+    → TcpConnection::handleWrite()
+        → ::write 从outputBuffer_取数据发送
+        → Buffer::retrieve(n) 移除已发送数据
+        → 缓冲区发空：Channel::disableWriting()
+        → 发送完成触发writeCompleteCallback_
+
+5. 关闭连接流程
+    主动关闭(服务端踢人)：
+	1. 用户调用：conn->shutdown()
+	2. 进入：TcpConnection::shutdown()
+   设置状态 kDisconnecting
+   跨线程 runInLoop
+	3. 执行：TcpConnection::shutdownInLoop()
+   调用 socket_->shutdownWrite() 【关闭写端，发 FIN】
+	4. 等待数据发完 → 触发 handleWrite
+	5. 客户端回 FIN → 服务端 read 返回 0
+	6. 进入：TcpConnection::handleRead()
+   n == 0 → 调用 handleClose()
+	7. 最终执行：TcpConnection::handleClose()
+   	 关闭所有事件
+  	 回调通知用户
+  	 通知 TcpServer 移除连接
+  	 从 loop 移除 channel
+	被动关闭(客户端先断开)
+    1. 客户端 close() 断开 → 发 FIN
+	2. 服务端触发读事件
+	3. 进入：TcpConnection::handleRead()
+	4. readFd() 返回 0
+	5. 直接调用：TcpConnection::handleClose()
+	6. handleClose 做收尾工作：
+   channel_->disableAll()
+   connectionCallback_ 通知断开
+   closeCallback_ 通知 TcpServer 删除连接
+   loop_->removeChannel(channel)
+所有关闭都会走到handleClose()，最终统一流程：
+   handleClose() → 取消事件 → 回调用户 → 移除 channel → 销毁连接
+```
+
+## `muduo`工具
+
+### 定时器
+
+**`Timer`**
+
+就是一个定时器对象，工作流程：
+
+1.创建`Timer`，给定回调+时间
+
+2.加入`TimerQueue`管理
+
+3.时间到，调用`run`执行回调
+
+4.如果是重复定时器，调用`restart()`计算下一次时间，重新加入队列等待
+
+```c
+namespace mulib{
+    using base::Timestamp;
+    namespace net{
+        class Timer : noncopyable
+        {
+        public:
+            using TimerCallback = std::function<void()>;
+            Timer(TimerCallback cb, Timestamp when, double interval);
+            void run() const;
+            Timestamp expiration() const;//下次什么时候跑
+            bool repeat() const;//是否重复定时器
+            void restart(Timestamp now);
+            static int64_t numCreated();
+
+        private:
+            const TimerCallback callback_; // 定时器触发时要调用的回调函数
+            Timestamp expiration_;         // 当前这次触发的时间点
+            const double interval_;        // 表示定时器的触发间隔，单位为秒。
+            const bool repeat_;            // 是否是周期性定时器
+
+            const int64_t sequence_; // 每创建一个 Timer，这个号就会递增
+            static std::atomic<int64_t> s_numCreated;
+        };
+    }
+}
+```
+
+**`TimerId`**
+
+这个类就是定时器的安全身份证，防止`TimerQueue`删除一个已经被销毁的定时器
+
+**`TimerQueue`**
+
+定时器管理器，管理所有定时器，时间一到自动触发回调
+
+底层：`Linux timerfd`+`std::set`
+
+一个`TimerQueue`一个`EventLoop`
+
+**内部类型定义**
+
+```c
+private:
+    // Entry = 时间戳 + 定时器指针
+    // 用来按时间排序
+    using Entry = std::pair<Timestamp, Timer *>;
+    
+    // 有序集合：自动按时间从小到大排序
+    using TimerList = std::set<Entry>;
+
+    // ActiveTimer = 定时器指针 + 序列号
+    // 用来安全管理、取消定时器
+    using ActiveTimer = std::pair<Timer *, int64_t>;
+    using ActiveTimerSet = std::set<ActiveTimer>;
+```
+
+为什么用`std::set`?
+
+最早到期的永远排在最前面
+
+**私有成员函数**
+
+```c
+    // 线程安全：在IO线程添加定时器
+    void addTimerInLoop(Timer *timer);
+    // 线程安全：在IO线程取消定时器
+    void cancelInLoop(TimerId timerid);
+    // timerfd 触发读事件时调用（时间到了！）
+    void handleRead();
+    // 获取所有已到期的定时器
+    std::vector<Entry> getExpired(Timestamp now);
+    // 重置：把重复定时器重新加入队列
+    void reset(const std::vector<Entry> &expired, Timestamp now);
+    // 插入定时器到集合
+    bool insert(Timer *timer);
+```
+
+**私有成员变量**
+
+```c
+private:
+    EventLoop *loop_;              // 所属事件循环
+    const int timerfd_;            // Linux 定时器文件描述符
+    Channel timerfdChannel_;       // 监听 timerfd 的 Channel
+    TimerList timers_;             // 按时间排序的定时器队列
+    ActiveTimerSet activeTimers_;  // 活跃定时器集合（安全管理用）
+    // ------------- 安全处理机制 -------------
+    std::atomic<bool> callingExpiredTimers_; // 是否正在执行回调
+    ActiveTimerSet cancelingTimers_;         // 正在取消的定时器
+```
+
+如何实现定时器到期唤醒的？
+
+关键是`timerfd`,`Linux`内核提供的定时器专用文件描述符，把定时事件抽象成普通`fd`，可被监听封装成事件驱动
+
+工作原理：调用`timerfd_create`生成专属定时器`fd`，`timerfd_settime`告诉内核定时器时长与周期，将该`fd`加入`epoll`监听可读事件，时间到达，内核标记`timerfd`为可读，`epoll`唤醒，调用`handleRead`，找到超时`Timer`，执行`run`
+
+### 缓存线程ID机制
+
+`__thread`是`GCC`扩展关键字，表示每个线程都有自己独立的变量副本，这就是线程局部存储`TLS`
+
+```c
+ pid_t tid();       // 获取缓存的线程 ID
+ pid_t gettid();    // 真正调用系统调用获取 tid
+```
+
+### 日志
+
+定义了日志宏，以及类`SourceFile`、类`Impl`、类`Logger`、类`LogStream`
+
+**1.`LogStream`类(能写<<的原因)**
+
+是日志的“缓冲区”
+
+核心成员
+
+```c
+private:
+    std::string buffer_;
+```
+
+日志缓冲区，用`<<`输出的内容全部存在这里
+
+最核心：万能`<<`重载
+
+```c
+template <typename T>
+LogStream &LogStream::operator<<(const T &val)
+{
+    std::ostringstream oss;
+    oss << val;           // 把数据转成字符串
+    if (isMaxString())    // 没超过上限
+    {
+        buffer_ += oss.str();  // 追加到缓冲区
+    }
+    return *this;         // 支持链式 <<
+}
+```
+
+模板函数，支持任何类型，`return *this`返回流对象本身支持无限链式
+
+**2.日志宏**
+
+```c
+#define LOG_TRACE                                                            \
+    if (muduo::base::Logger::logLevel() <= muduo::base::Logger::TRACE)       \
+        \muduo::base::Logger(__FILE__, __LINE__, muduo::base::Logger::TRACE, \
+                             __func__)                                       \
+            .stream();//Logger()创建临时Logger对象，__FILE__编译器自动填当前文件名，__LINE__编译器自动填当前行号，__func__编译器自动填当前函数名，.stream()返回LogStream&,所以LOG_TRACE<<才能输出
+```
+
+```c
+日志等级
+enum LogLevel {
+    TRACE,   // 跟踪
+    DEBUG,   // 调试
+    INFO,    // 正常信息
+    WARN,    // 警告
+    ERROR,   // 错误
+    FATAL    // 致命错误（会崩溃）
+};
+```
+
+先判断等级，等级不够不执行，0开销，等级够就创建`Logger`对象，返回流`stream()`，`Impl`类才是真实干活的，填充日志需要的东西(格式化时间、格式化级别、拼接日志头)，`Impl`拼接日志头，`LogStream`拼接自定义要输出的东西，`SourceFile`类是专门用来处理`FILE`的，`__FILE__`编译器自动填充文件名，这个类的作用是截取最后的文件名
+
+```c
+Impl拼接的内容：
+[时间] [级别] [文件名:行号] [消息]
+```
+
+**3.`Logger`内部函数**
+
+```c
+Logger(文件, 行号);                 // INFO
+Logger(文件, 行号, 等级);           // DEBUG/WARN/ERROR
+Logger(文件, 行号, 等级, 函数名);   // TRACE
+Logger(文件, 行号, 是否崩溃);       // SYSFATAL
+LogStream& stream();
+~Logger();
+```
+
+`LogStream`返回一个流式输出对象，让你可以用<<拼接任何类型
+
+`~Logger()`析构函数才是日志真正输出的地方：写`LOG_INFO<<"hello"`，内容存在`LogDtream:buffer_`，当这条语句结束，`Logger`对象销毁，析构函数把完整日志输出到屏幕/文件
+
+**整个日志系统的完整流程：**
+
+1.宏创建`Logger`
+
+2.`Logger`创建`Impl`
+
+3.`Impl`格式化时间、级别、文件名、行号
+
+4.`.stream()`返回`LogStream`
+
+5.`<<"hello"`写入`buffer`
+
+6.语句结束，析构函数
+
+7.输出完整日志
+
 ## 服务端的`main`函数
 
 ```c
-#include <muduo/net/EventLoop.h>
-#include <muduo/net/TcpServer.h>
-#include <muduo/base/Logging.h>
-#include <muduo/base/Timestamp.h>
-
 using namespace muduo;
 using namespace muduo::net;
-
 // 全局/成员变量：记录当前连接数
 int g_connCount = 0;
 
@@ -611,13 +921,11 @@ void printServerStatus()
     LOG_INFO << "当前活跃连接数: " << g_connCount;
     LOG_INFO << "==================\n";
 }
-
 // 2. 定时清理空闲连接（你要的定时器场景）
 void checkIdleConnections()
 {
     LOG_INFO << "定时检查: 无空闲连接需要清理 (演示用)";
 }
-
 // 连接建立/断开回调
 void onConnection(const TcpConnectionPtr& conn)
 {
@@ -632,60 +940,100 @@ void onConnection(const TcpConnectionPtr& conn)
         g_connCount--;
     }
 }
-
 // 消息到达回调
 void onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp time)
 {
     string msg = buf->retrieveAllAsString();
     LOG_INFO << "收到消息: " << msg << " 来自: " << conn->peerAddress().toIpPort();
-
     // 回显给客户端
     conn->send(msg);
 }
-
 int main()
 {
     // 初始化日志等级（INFO及以上输出）
     Logger::setLogLevel(Logger::INFO);
-
     // 主线程 EventLoop
     EventLoop loop;
-
     // 监听 0.0.0.0: 8888
     InetAddress listenAddr(8888);
     TcpServer server(&loop, listenAddr, "SimpleServer");
-
     // 开启 3 个子 IO 线程
     server.setThreadNum(3);
-
     // 设置回调
     server.setConnectionCallback(onConnection);
     server.setMessageCallback(onMessage);
-
-    // ====================== 定时器 核心代码 ======================
-
+    // 定时器核心代码
     // 1. 每 5 秒执行一次：打印服务器状态（周期性任务）
     loop.runEvery(5.0, printServerStatus);
-
     // 2. 每 10 秒执行一次：清理空闲连接（超时断开用）
     loop.runEvery(10.0, checkIdleConnections);
-
     // 3. 3 秒后执行一次：服务器启动成功提示（一次性延时任务）
     loop.runAfter(3.0, [](){
         LOG_INFO << "===== 服务器启动完成，已监听 8888 端口 =====";
     });
-
-    // ============================================================
-
     // 启动服务器
     server.start();
-
     // 事件循环（必须调用）
+    loop.loop();
+    return 0;
+}
+```
+
+## 客户端的`main`函数
+
+```c
+using namespace muduo;
+using namespace muduo::net;
+
+// 连接建立/断开回调（和服务端格式一样）
+void onConnection(const TcpConnectionPtr& conn)
+{
+    if (conn->connected())
+    {
+        LOG_INFO << "客户端 ===> 成功连接服务器: " << conn->peerAddress().toIpPort();
+
+        // 一连接成功就发一条消息
+        conn->send("Hello from muduo client!");
+    }
+    else
+    {
+        LOG_INFO << "客户端 ===> 与服务器断开连接";
+    }
+}
+
+// 消息到达回调（和服务端一一对应）
+void onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp time)
+{
+    string msg = buf->retrieveAllAsString();
+    LOG_INFO << "客户端 ===> 收到服务器回显: " << msg;
+
+    // 收到后可以再发，也可以关闭
+    // conn->send("I got your echo!");
+}
+
+int main()
+{
+    Logger::setLogLevel(Logger::INFO);
+
+    // 客户端也需要一个事件循环
+    EventLoop loop;
+
+    // 连接 127.0.0.1:8888（和服务端对应）
+    InetAddress serverAddr(8888, "127.0.0.1");
+    TcpClient client(&loop, serverAddr, "SimpleClient");
+
+    // 设置 2 个核心回调（和服务端完全一样）
+    client.setConnectionCallback(onConnection);
+    client.setMessageCallback(onMessage);
+
+    // 客户端必须调用 connect()
+    client.connect();
+
+    // 客户端事件循环
     loop.loop();
 
     return 0;
 }
-
 ```
 
 

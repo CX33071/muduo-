@@ -1,4 +1,4 @@
-# <center>`muduo`网络库</center>
+# <center>muduo网络库</center>
 
 [toc]
 
@@ -8,13 +8,13 @@
 
 ## 核心模型：
 
-### <span style="color:#87CEEB">主从`Reactor`:</span>
+### <span style="color:#87CEEB">主从Reactor:</span>
 
 主`Reactor`:`Acceptor`监听新的客户端连接
 
 从`Reactor`:每个线程一个`EventLoop`处理已连接客户端的收发数据
 
-### <span style="color:#87CEEB">`one loop per thread`:</span>
+### <span style="color:#87CEEB">one loop per thread:</span>
 
 一个线程一个`EventLoop`，IO操作全在本线程，无锁高并发
 
@@ -30,41 +30,41 @@
 
 ## 核心组件：
 
-### `EventLoop`类
+### EventLoop类
 
 一个线程一个`EventLoop`事件循环，等待事件，处理事件，继续等待事件，每个客户端对应一个`EventLoop`，但是一个`EventLoop`对应多个客户端，一个`EventLoop`有一个`epoller`(`epoll`的封装)和多个`channel`(`fd`的管理器)，这个事件循环里进行的就是`epoll_wait`监听等待事件，处理事件，然后继续等待事件
 
-### `Channel`类
+### Channel类
 
 每个`fd`对应的管理器，实现对`fd`的监听、删除事件和处理，当有`fd`就绪时调用成员函数`handleEvent`,`handleEvent`内部调用4个回调来处理读写、关闭、错误事件，是调用真正处理事件的工具的地方
 
-### `TcpServer`类
+### TcpServer类
 
 这就是整个服务端的一个大框架，在一个主`EventLoop`循环里初始化(创建、绑定)服务端，创建`Acceptor`接受者在主`Reactor`里来接受新客户端的连接，当有新客户端连接成功时调用成员函数`newConnection`给新客户端`fd`从线程池中分配一个线程并且创建`Tcpconnection`通道，主要业务就是主`Reactor`
 
-### `TcpClient`类
+### TcpClient类
 
 这是对应客户端的工具，和`TcpServer`一样，先创建启动客户端，每个客户端有自己的`Connector`管理者，`Connector`进行服务端的连接，连接成功后调用成员函数`newConnection`创建`Tcpconnection`通道，接下来就是客户端的收发数据业务
 
-### `Acceptor`类
+### Acceptor类
 
 这也是服务端最核心的一个工具：接受器。顾名思义作用就是来接受新的客户端的连接，当有客户端连接时调用成员函数`handleRead`来处理，连接成功后用回调函数`newConnectionCallback_`把`sock`交给`TcpServer`创建`Tcpconnection`来管理这个连接
 
-### `Connector`类
+### Connector类
 
 对应的这就是客户端的一个核心工具：连接器。用来连接服务端，有连接失败的重连和断开连接的重连函数，一样的如果成功连接上服务端有`Callback_`回调函数来通知`TcpClient`创建`Tcpconnection`通道
 
-### `Tcpconnection`类
+### Tcpconnection类
 
 这就是服务端和客户端连接成功时双方都要创建的`Tcpconnection`通道，双方传数据是在这个通道里，自然发送接受数据的函数也是`Tcpconnection`类里的成员函数，`handleRead`用来读取对方发过来的数据，`send`用来发送数据，如果一次性发不完会把数据存在`outputBuffer`临时缓冲区，`handleWrite`用来自动发没发完存在`outputBuffer`的数据
 
-### `Buffer`类
+### Buffer类
 
 缓冲区类是收发数据的关键工具，自动扩容的`TCP`缓冲区，能够解决拆包、粘包、读写数据的任务，底层是通过`vector`和双指针(读写指针)实现的，粘包拆包问题是通过头部预留空间(收发数据长度)实现的，服务端和客户端之间通信通过检查`\r\n`基本不会出现粘包拆包问题，文件收发时需要解决粘包拆包问题
 
 ## 具体类接口
 
-### 模块一：`Reactor`核心(事件驱动)
+### 模块一：Reactor核心(事件驱动)
 
 这个板块包括`Channel`类、`Epoller`类、`EventLoop`类、`EventLoopThread`类、`EventLoopThreadLoop`类
 
@@ -330,7 +330,7 @@ namespace muduo{
 
 客户端发起连接→主线程 `Acceptor` 获取客户端 `fd`→线程池分配子线程` EventLoop`→创建绑定 `fd` 的  `Channel`→子线程更新通道加入 `epoll` 监听→数据抵达触发 `IO` 事件→`Epoller` 上报活跃 `Channel`→`Channel ` 执行读写回调完成数据交
 
-### 模块二：网络基础(`socket`、地址、缓冲区)
+### 模块二：网络基础(socket、地址、缓冲区)
 
 **`InetAddress`**就是对 `sockaddr_in` 的 C++ 包装
 
@@ -435,7 +435,7 @@ namespace mulib{
             using MessageCallback = std::function<void(const TcpConnectionPtr &, Buffer *, Timestamp)>;
             using WriteCompleteCallback = std::function<void(const TcpConnectionPtr &)>;
             using CloseCallback = std::function<void(const TcpConnectionPtr &)>;
-            using HighWaterMarkCallback = std::function<void(const TcpConnectionPtr &, size_t)>;
+            using HighWaterMarkCallback = std::function<void(const TcpConnectionPtr &, size_t)>;//
 
             TcpConnection(EventLoop *loop, std::string conName, int sockfd, InetAddress localAddr, InetAddress peerAddr);
             ~TcpConnection();
